@@ -444,3 +444,20 @@ Things that each cost us hours, in rough order of pain. Worth skimming before yo
     Worth reading next to the concurrency section of the README: seats above the
     residency were already useless (they queue, then preempt). Past 12 at `CTX=huge`
     they stop being useless and become fatal.
+
+40. **The vision tower cannot be selected by vLLM's built-in parameter filter.**
+    `--cpu-offload-params` matches modules created through `make_layers()` and uses
+    names relative to the wrapped module. Qwen3.5 constructs `visual` directly in
+    `__init__`, and its relative names are `blocks.N`, `merger`, and `patch_embed`,
+    so `--cpu-offload-params visual` does not select it. A bare
+    `--cpu-offload-gb N` instead starts with decoder layers, which are read on every
+    decode step and are the worst weights to move for this use case.
+
+    `patches/qwen3_5-visual-uva.patch` gives the tower its own `UVAOffloader` after
+    weight loading. It activates only for the launcher's `VISION=uva` combination
+    (`--offload-backend uva --cpu-offload-params visual`); `VISION=0` and the
+    backward-compatible GPU mode `VISION=1` are unchanged. The tower then lives in
+    pinned CPU memory and is read only during image encoder prefill. Encoder
+    profile/cache allocations still live on the GPU, and image TTFT pays the PCIe
+    cost. On WSL2, zero-copy UVA requires `VLLM_WSL2_ENABLE_PIN_MEMORY=1`; otherwise
+    vLLM's offloader falls back to a per-forward device copy.

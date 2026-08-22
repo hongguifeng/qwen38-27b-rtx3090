@@ -413,23 +413,36 @@ TOOL_ARGS=$([ "${TOOLS:-1}" = 1 ] && echo --enable-auto-tool-choice --tool-call-
 
 # Vision. --language-model-only drops the vision tower cleanly -- no weights loaded,
 # 0.858 GiB on this checkpoint (gotcha 9) -- and stays the default. VISION=1 keeps
-# the tower, for a client that sends images: screenshots into a coding assistant,
-# captioning, document photos.
+# the tower on the GPU exactly as before. VISION=uva is the only added mode: it keeps
+# image support and the same image-count/pixel limits, but moves just the vision tower
+# to pinned CPU memory through patches/qwen3_5-visual-uva.patch. Text decode never
+# executes the tower; image encoder cache/profile allocations remain on the GPU.
 #
 # Only --language-model-only needs a knob. It is hardcoded in the exec line below, so
 # the alternative is countering it with --no-language-model-only from EXTRA_ARGS and
 # depending on which flag argparse saw last -- which regresses silently: images are
 # still accepted and still counted as prompt tokens, and the model answers from
-# placeholder embeddings. The two flags VISION=1 adds have no such conflict and can
-# be overridden from EXTRA_ARGS, which is expanded after them. The pixel cap is
-# shipped rather than left to the processor default because vLLM profiles the encoder
-# at the largest image it will accept, and that peak comes out of the KV pool:
+# placeholder embeddings. The multimodal flags have no such conflict and can be
+# overridden from EXTRA_ARGS, which is expanded after them. The pixel cap is shipped
+# rather than left to the processor default because vLLM profiles the encoder at the
+# largest image it will accept, and that peak comes out of the KV pool:
 # 2097152 px = 2048 image tokens.
-if [ "${VISION:-0}" = 1 ]; then
-  VISION_ARGS='--limit-mm-per-prompt {"image":{"count":1}} --mm-processor-kwargs {"size":{"shortest_edge":65536,"longest_edge":2097152}}'
-else
-  VISION_ARGS="--language-model-only"
-fi
+VISION=${VISION:-0}
+case "$VISION" in
+  1)
+    VISION_ARGS='--limit-mm-per-prompt {"image":{"count":1}} --mm-processor-kwargs {"size":{"shortest_edge":65536,"longest_edge":2097152}}'
+    ;;
+  uva)
+    VISION_ARGS='--limit-mm-per-prompt {"image":{"count":1}} --mm-processor-kwargs {"size":{"shortest_edge":65536,"longest_edge":2097152}} --offload-backend uva --cpu-offload-gb 1 --cpu-offload-params visual'
+    ;;
+  0)
+    VISION_ARGS="--language-model-only"
+    ;;
+  *)
+    echo "VISION must be 0, 1 or uva (got: $VISION)" >&2
+    exit 1
+    ;;
+esac
 
 # fp16 activations do not work with the speculative path, and every way of finding
 # that out is late and cryptic (#27): the split-KV verify kernel hardcodes
