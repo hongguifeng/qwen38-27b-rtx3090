@@ -414,9 +414,9 @@ TOOL_ARGS=$([ "${TOOLS:-1}" = 1 ] && echo --enable-auto-tool-choice --tool-call-
 # Vision. --language-model-only drops the vision tower cleanly -- no weights loaded,
 # 0.858 GiB on this checkpoint (gotcha 9) -- and stays the default. VISION=1 keeps
 # the tower on the GPU exactly as before. VISION=uva is the only added mode: it keeps
-# image support and the same image-count/pixel limits, but moves just the vision tower
-# to pinned CPU memory through patches/qwen3_5-visual-uva.patch. Text decode never
-# executes the tower; image encoder cache/profile allocations remain on the GPU.
+# image support, but moves just the vision tower to pinned CPU memory through
+# patches/qwen3_5-visual-uva.patch. Text decode never executes the tower; image
+# encoder cache/profile allocations remain on the GPU.
 #
 # Only --language-model-only needs a knob. It is hardcoded in the exec line below, so
 # the alternative is countering it with --no-language-model-only from EXTRA_ARGS and
@@ -426,14 +426,15 @@ TOOL_ARGS=$([ "${TOOLS:-1}" = 1 ] && echo --enable-auto-tool-choice --tool-call-
 # overridden from EXTRA_ARGS, which is expanded after them. The pixel cap is shipped
 # rather than left to the processor default because vLLM profiles the encoder at the
 # largest image it will accept, and that peak comes out of the KV pool:
-# 2097152 px = 2048 image tokens.
+# 2097152 px = 2048 image tokens. There is no explicit image-count limit here;
+# the model context is the practical bound (vLLM's internal fallback is 999 items).
 VISION=${VISION:-0}
 case "$VISION" in
   1)
-    VISION_ARGS='--limit-mm-per-prompt {"image":{"count":1}} --mm-processor-kwargs {"size":{"shortest_edge":65536,"longest_edge":2097152}}'
+    VISION_ARGS='--mm-processor-kwargs {"size":{"shortest_edge":65536,"longest_edge":2097152}}'
     ;;
   uva)
-    VISION_ARGS='--limit-mm-per-prompt {"image":{"count":1}} --mm-processor-kwargs {"size":{"shortest_edge":65536,"longest_edge":2097152}} --offload-backend uva --cpu-offload-gb 1 --cpu-offload-params visual'
+    VISION_ARGS='--mm-processor-kwargs {"size":{"shortest_edge":65536,"longest_edge":2097152}} --offload-backend uva --cpu-offload-gb 1 --cpu-offload-params visual'
     ;;
   0)
     VISION_ARGS="--language-model-only"

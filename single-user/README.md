@@ -375,9 +375,10 @@ included (`tools` + `tool_choice: "auto"` come back as `tool_calls`).
 
 ## Vision tower placement
 
-`VISION=1` is unchanged: the vision tower stays on the GPU and requests use the
-same one-image, 2,048-image-token limits as `main`. `VISION=uva` is the only
-additional mode. It enables the same image API and limits while
+`VISION=1` keeps the vision tower on the GPU. Neither `VISION=1` nor `VISION=uva`
+sets an explicit image-count limit; the shared model context is the practical
+bound, while each image has a 2,048-image-token cap. `VISION=uva` is the
+additional placement mode: it enables the same image API and limits while
 `patches/qwen3_5-visual-uva.patch` moves only the 0.858 GiB BF16 vision tower to
 pinned CPU memory. Text decode never executes the tower; image requests read it
 over PCIe during encoder prefill, so image TTFT is higher while GPU headroom is
@@ -401,7 +402,7 @@ it vLLM falls back to copying the tower for each encoder run.
 | `GPU_UTIL` | 0.93 | soak-tested with a 100k prompt and 4×6k-token generations; batch mode's 0.972 OOMs in the MTP path (docs/gotchas.md, gotcha 4) |
 | `MTP_DRAFT_VOCAB` | 1 | set 0 to draft with the full lm_head (more acceptance, slower per draft) |
 | `TOOLS` | 1 | tool/function calling (`--enable-auto-tool-choice --tool-call-parser`). `TOOL_PARSER` (`qwen3_coder`) must match the XML call format this model's chat template emits — `hermes` parses the JSON a Qwen model does *not* produce here, and fails silently. 0 = off, and `tool_choice: "auto"` then 400s |
-| `VISION` | 0 | `1` keeps the vision tower on the GPU with the existing behavior. `uva` keeps the same image support and limits but selectively offloads only the 0.858 GiB BF16 vision tower to pinned CPU memory (`patches/qwen3_5-visual-uva.patch`). One image per prompt and a 2,048-image-token pixel cap, both overridable from `EXTRA_ARGS` |
+| `VISION` | 0 | `1` keeps the vision tower on the GPU with the existing behavior. `uva` keeps the same image support and limits but selectively offloads only the 0.858 GiB BF16 vision tower to pinned CPU memory (`patches/qwen3_5-visual-uva.patch`). No explicit image-count cap (vLLM's internal fallback is 999 items); each image has a 2,048-image-token pixel cap, overridable from `EXTRA_ARGS` |
 | `PORT` | 18020 | |
 
 ## Switching modes
