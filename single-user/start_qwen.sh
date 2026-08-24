@@ -280,14 +280,29 @@ if [ "$SPEC" = "dflash2" ]; then
   # against a single ~3.7k-token prompt (gotcha 39):
   #   MAX_SEQS=8   596 MiB  ok      MAX_SEQS=12  416 MiB  ok
   #   MAX_SEQS=10  456 MiB  ok      MAX_SEQS=16  356 MiB  DEAD, twice, same byte counts
-  # The prefill's transient set is ~356 MiB at --max-num-batched-tokens 2048, so 12
-  # clears it by ~60 MiB. Warning rather than a clamp: the number is a VRAM budget, and a
-  # card larger than 24 GiB will have room where this one does not. Lower KV_MEM if you
-  # genuinely need the seats.
+  # The transient set is elastic -- it squeezes to full speed with 8 MiB free -- but the
+  # first real batch's per-seat allocations are not, so the floor is sharp: through the
+  # KV_MEM door at 8 seats it sits between 396 (dead) and 436 MiB (fine) of free VRAM,
+  # same allocator fingerprint as the seat door (gotcha 39, both tables). Warning rather
+  # than a clamp: the number is a VRAM budget, and a card larger than 24 GiB will have
+  # room where this one does not. Lower KV_MEM if you genuinely need the seats.
   if [ "$CTX" = "huge" ] && [ "$MAX_SEQS" -gt 12 ]; then
     echo "[start_qwen] WARNING: MAX_SEQS=$MAX_SEQS at CTX=huge killed the engine on the" \
          "first prompt on a 24 GiB card (boots, serves /health, then OutOfMemoryError)." \
          "12 is the highest verified here. Lower MAX_SEQS or lower KV_MEM." >&2
+  fi
+  # The same room through the other door: a KV_MEM pinned above the profile default
+  # spends the same headroom. On Linux the shortfall is a loud OutOfMemoryError on the
+  # first real batch; on WSL2 it is SILENT -- WDDM backs the failed mapping with host
+  # memory and prefill quietly runs 5-10x slower with nothing in the logs (issue #25).
+  KV_STOCK=5583457484; [ "$CTX" = "huge" ] && KV_STOCK=5261334938
+  if [ -n "$KV_MEM" ] && [ "$KV_MEM" -gt "$KV_STOCK" ]; then
+    echo "[start_qwen] WARNING: KV_MEM=$KV_MEM is above the profile default $KV_STOCK." \
+         "The extra pool is taken from the headroom prefill and the first concurrent" \
+         "batch allocate from, and the floor is close: +150 MiB ran, +200 MiB killed" \
+         "the engine at CTX=huge MAX_SEQS=8 (gotcha 39 has the ladder). On Linux the" \
+         "miss is a loud OutOfMemoryError; on WSL2 it is SILENT: no error, prefill" \
+         "5-10x slower. Ladder 4k/16k TTFT against known-good rates before trusting it." >&2
   fi
   [ -n "$KV_MEM" ] && EXTRA_ARGS="--kv-cache-memory=$KV_MEM ${EXTRA_ARGS}"
 else
@@ -445,21 +460,30 @@ case "$VISION" in
     ;;
 esac
 
-# fp16 activations do not work with the speculative path, and every way of finding
-# that out is late and cryptic (#27): the split-KV verify kernel hardcodes
-# tl.bfloat16 for the query cast and the dot accumulate
-# (patches/spec-decode-attn.patch), so it fails to *compile* at first attention with
-# "Both operands must be same dtype. Got bf16 and fp16"; disable it with SPEC_ATTN=0
-# and you get as far as the first sample, where the rejection sampler dies on a
-# device-side assert. Neither message names the dtype you set. Say so here instead.
-# This is a limitation of this repo's kernels, not of the checkpoint -- an fp16
-# target is fine with SPEC=none.
+# fp16 activations do not work with the speculative path, and the way you find that out
+# is late and cryptic (#27): the split-KV verify kernel hardcodes tl.bfloat16 for the
+# query cast and the dot accumulate (patches/spec-decode-attn.patch:217,236), so it
+# fails to *compile* at first attention with "Both operands must be same dtype. Got bf16
+# and fp16" -- a triton CompilationError that never names the dtype you set.
+#
+# Scope, stated honestly because an earlier version of this comment overreached: the
+# BLOCKER I can point at is that kernel. @ahnguyen17 also hit a device-side assert in
+# rejection_sample() with SPEC_ATTN=0, and I first wrote that up as a second bf16
+# assumption -- it is not. rejection_sampler_utils.py contains zero bf16/fp16 literals;
+# it promotes to tl.float32 on load and allocates its buffers float32/int64, so it is
+# dtype-agnostic. That assert has some other cause (it was seen on a w8a16 GPTQ target
+# whose GEMM path was already suspect, and a device-side assert reads like an
+# out-of-bounds index, not a dtype mismatch), and it is not established.
+#
+# So this refuses the combination rather than claiming to enumerate why it breaks:
+# fp16 + a speculator is untested here and its default path is bf16-only. SPEC=none is
+# the escape hatch -- a limitation of these kernels, not of any checkpoint.
 case " ${EXTRA_ARGS:-} " in
   *" --dtype float16 "*|*" --dtype=float16 "*|*" --dtype fp16 "*|*" --dtype=fp16 "*|*" --dtype half "*|*" --dtype=half "*)
     if [ "${SPEC:-mtp}" != "none" ]; then
-      echo "--dtype float16 needs SPEC=none: this repo's speculative kernels are bf16-only." >&2
+      echo "--dtype float16 needs SPEC=none: this repo's speculative path is bf16-only." >&2
       echo "  the split-KV verify attention casts to tl.bfloat16 (patches/spec-decode-attn.patch)," >&2
-      echo "  and the rejection sampler asserts device-side under fp16. See issue #27." >&2
+      echo "  so it fails to compile at the first attention. See issue #27." >&2
       exit 1
     fi ;;
 esac
